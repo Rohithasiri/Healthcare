@@ -1,15 +1,19 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routes import auth
 from app.database import engine, Base
 
-# Import models to create tables
+# Import models
 from app.models.user import User
 from app.models.health_profile import HealthProfile
 from app.models.screening_record import ScreeningRecord
 from app.models.cholesterol_record import CholesterolRecord
 from app.models.risk_assessment import RiskAssessment
 from app.models.alert import Alert
+
+# Import routes
+from app.routes.auth import router as auth_router
+from app.routes.profile import router as profile_router
+from app.routes.screening import router as screening_router
 
 # Create database tables
 Base.metadata.create_all(bind=engine)
@@ -28,8 +32,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include authentication routes
-app.include_router(auth.router)
+# Include routers
+app.include_router(auth_router)
+app.include_router(profile_router)
+app.include_router(screening_router)
 
 @app.get("/")
 def root():
