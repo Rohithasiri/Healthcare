@@ -1,0 +1,208 @@
+"""
+ML Services Client
+Handles communication with all microservices (rPPG, OCR, Risk Prediction, Eye Analysis)
+"""
+
+import httpx
+import logging
+from typing import Dict, Optional, Any
+from datetime import datetime
+
+logger = logging.getLogger(__name__)
+
+
+class MLServicesClient:
+    """Client for interacting with ML microservices"""
+    
+    def __init__(self):
+        # Microservice URLs - update these based on your deployment
+        self.services = {
+            'rppg': 'http://localhost:8001',
+            'ocr': 'http://localhost:8002',
+            'eye_analysis': 'http://localhost:8003',
+            'risk_prediction': 'http://localhost:8004'
+        }
+        self.timeout = 30.0  # 30 seconds timeout
+    
+    async def health_check(self, service_name: str) -> bool:
+        """Check if a microservice is healthy"""
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.get(f"{self.services[service_name]}/health")
+                return response.status_code == 200
+        except Exception as e:
+            logger.error(f"Health check failed for {service_name}: {str(e)}")
+            return False
+    
+    async def predict_risk(
+        self,
+        age: int,
+        gender: str,
+        blood_pressure_systolic: float,
+        blood_pressure_diastolic: float,
+        cholesterol_total: Optional[float] = None,
+        cholesterol_hdl: Optional[float] = None,
+        cholesterol_ldl: Optional[float] = None,
+        glucose: Optional[float] = None,
+        bmi: Optional[float] = None,
+        smoking: bool = False,
+        diabetes: bool = False,
+        family_history: bool = False,
+        heart_rate: Optional[float] = None,
+        vessel_density: Optional[float] = None,
+        av_ratio: Optional[float] = None,
+        user_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Call risk prediction microservice
+        
+        Returns:
+            Dict with risk_score, risk_category, factors_contributing, recommendations
+        """
+        try:
+            payload = {
+                "user_id": user_id,
+                "factors": {
+                    "age": age,
+                    "gender": gender,
+                    "blood_pressure_systolic": blood_pressure_systolic,
+                    "blood_pressure_diastolic": blood_pressure_diastolic,
+                    "cholesterol_total": cholesterol_total,
+                    "cholesterol_hdl": cholesterol_hdl,
+                    "cholesterol_ldl": cholesterol_ldl,
+                    "glucose": glucose,
+                    "bmi": bmi,
+                    "smoking": smoking,
+                    "diabetes": diabetes,
+                    "family_history": family_history,
+                    "heart_rate": heart_rate,
+                    "vessel_density": vessel_density,
+                    "av_ratio": av_ratio
+                }
+            }
+            
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.post(
+                    f"{self.services['risk_prediction']}/predict",
+                    json=payload
+                )
+                response.raise_for_status()
+                return response.json()
+                
+        except httpx.HTTPError as e:
+            logger.error(f"Risk prediction API error: {str(e)}")
+            raise Exception(f"Risk prediction service unavailable: {str(e)}")
+        except Exception as e:
+            logger.error(f"Risk prediction error: {str(e)}")
+            raise
+    
+    async def process_rppg_video(
+        self,
+        video_path: str,
+        method: str = 'face'
+    ) -> Dict[str, Any]:
+        """
+        Process video for rPPG (heart rate extraction)
+        
+        Args:
+            video_path: Path to video file
+            method: 'face' or 'finger'
+            
+        Returns:
+            Dict with heart_rate, confidence, blood_pressure_estimate
+        """
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:  # Longer timeout for video processing
+                with open(video_path, 'rb') as video_file:
+                    files = {'video': video_file}
+                    data = {'method': method}
+                    
+                    response = await client.post(
+                        f"{self.services['rppg']}/process",
+                        files=files,
+                        data=data
+                    )
+                    response.raise_for_status()
+                    return response.json()
+                    
+        except httpx.HTTPError as e:
+            logger.error(f"rPPG processing error: {str(e)}")
+            raise Exception(f"rPPG service unavailable: {str(e)}")
+        except Exception as e:
+            logger.error(f"Video processing error: {str(e)}")
+            raise
+    
+    async def analyze_eye_image(
+        self,
+        image_path: str
+    ) -> Dict[str, Any]:
+        """
+        Analyze retinal image for cardiovascular markers
+        
+        Args:
+            image_path: Path to retinal image
+            
+        Returns:
+            Dict with vessel_density, av_ratio, abnormalities
+        """
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                with open(image_path, 'rb') as image_file:
+                    files = {'image': image_file}
+                    
+                    response = await client.post(
+                        f"{self.services['eye_analysis']}/analyze",
+                        files=files
+                    )
+                    response.raise_for_status()
+                    return response.json()
+                    
+        except httpx.HTTPError as e:
+            logger.error(f"Eye analysis error: {str(e)}")
+            raise Exception(f"Eye analysis service unavailable: {str(e)}")
+        except Exception as e:
+            logger.error(f"Image analysis error: {str(e)}")
+            raise
+    
+    async def extract_text_from_report(
+        self,
+        image_path: str
+    ) -> Dict[str, Any]:
+        """
+        Extract text from medical report image using OCR
+        
+        Args:
+            image_path: Path to medical report image
+            
+        Returns:
+            Dict with extracted_text, structured_data
+        """
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                with open(image_path, 'rb') as image_file:
+                    files = {'image': image_file}
+                    
+                    response = await client.post(
+                        f"{self.services['ocr']}/extract",
+                        files=files
+                    )
+                    response.raise_for_status()
+                    return response.json()
+                    
+        except httpx.HTTPError as e:
+            logger.error(f"OCR error: {str(e)}")
+            raise Exception(f"OCR service unavailable: {str(e)}")
+        except Exception as e:
+            logger.error(f"Text extraction error: {str(e)}")
+            raise
+    
+    async def get_all_services_status(self) -> Dict[str, bool]:
+        """Check health status of all microservices"""
+        status = {}
+        for service_name in self.services.keys():
+            status[service_name] = await self.health_check(service_name)
+        return status
+
+
+# Singleton instance
+ml_client = MLServicesClient()

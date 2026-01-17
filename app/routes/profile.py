@@ -3,10 +3,11 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from app.database import get_db
 from app.models.health_profile import HealthProfile
+from app.models.cholesterol_record import CholesterolRecord
 from app.models.user import User
 from app.utils.auth import get_current_user
-from typing import List
-from datetime import datetime
+from typing import List, Optional
+from datetime import datetime, date
 
 router = APIRouter(prefix="/api/profile", tags=["Health Profile"])
 
@@ -21,12 +22,21 @@ class HealthProfileCreate(BaseModel):
     family_history: List[str] = []
     current_medications: List[str] = []
 
+class CholesterolRecordCreate(BaseModel):
+    test_date: str  # YYYY-MM-DD format
+    total_cholesterol: float
+    ldl_cholesterol: Optional[float] = None
+    hdl_cholesterol: Optional[float] = None
+    triglycerides: Optional[float] = None
+    # Removed test_location and notes - not in your model
+
 @router.post("/create")
 def create_health_profile(
     profile_data: HealthProfileCreate,
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    """Create or update health profile"""
     existing_profile = db.query(HealthProfile).filter(
         HealthProfile.user_id == current_user["user_id"]
     ).first()
@@ -85,6 +95,7 @@ def get_health_profile(
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    """Get current user's health profile"""
     profile = db.query(HealthProfile).filter(
         HealthProfile.user_id == current_user["user_id"]
     ).first()
@@ -115,3 +126,141 @@ def get_health_profile(
         "current_medications": profile.current_medications,
         "updated_at": profile.updated_at
     }
+
+
+# ========== CHOLESTEROL ENDPOINTS ==========
+
+@router.post("/cholesterol/add")
+def add_cholesterol_record(
+    record_data: CholesterolRecordCreate,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Add a new cholesterol test record"""
+    try:
+        # Parse the test date
+        test_date = datetime.strptime(record_data.test_date, "%Y-%m-%d").date()
+        
+        # Create new cholesterol record (only with fields that exist in model)
+        new_record = CholesterolRecord(
+            user_id=current_user["user_id"],
+            test_date=test_date,
+            total_cholesterol=record_data.total_cholesterol,
+            ldl_cholesterol=record_data.ldl_cholesterol,
+            hdl_cholesterol=record_data.hdl_cholesterol,
+            triglycerides=record_data.triglycerides
+        )
+        
+        db.add(new_record)
+        db.commit()
+        db.refresh(new_record)
+        
+        # Get the ID field name dynamically (could be 'id', 'record_id', 'cholesterol_id', etc.)
+        id_field = None
+        for attr in ['id', 'record_id', 'cholesterol_id']:
+            if hasattr(new_record, attr):
+                id_field = getattr(new_record, attr)
+                break
+        
+        return {
+            "message": "Cholesterol record added successfully",
+            "record_id": id_field,
+            "test_date": new_record.test_date.strftime("%Y-%m-%d"),
+            "total_cholesterol": new_record.total_cholesterol,
+            "hdl_cholesterol": new_record.hdl_cholesterol,
+            "ldl_cholesterol": new_record.ldl_cholesterol
+        }
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid date format. Use YYYY-MM-DD: {str(e)}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error adding cholesterol record: {str(e)}"
+        )
+
+
+@router.get("/cholesterol/history")
+def get_cholesterol_history(
+    limit: int = 10,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get cholesterol test history for current user"""
+    records = db.query(CholesterolRecord).filter(
+        CholesterolRecord.user_id == current_user["user_id"]
+    ).order_by(CholesterolRecord.test_date.desc()).limit(limit).all()
+    
+    if not records:
+        return {
+            "message": "No cholesterol records found",
+            "records": []
+        }
+    
+    return {
+        "records": [
+            {
+                "record_id": getattr(r, 'id', getattr(r, 'record_id', None)),
+                "test_date": r.test_date.strftime("%Y-%m-%d"),
+                "total_cholesterol": r.total_cholesterol,
+                "ldl_cholesterol": r.ldl_cholesterol,
+                "hdl_cholesterol": r.hdl_cholesterol,
+                "triglycerides": r.triglycerides,
+                "created_at": r.created_at.isoformat() if r.created_at else None
+            }
+            for r in records
+        ]
+    }
+
+
+@router.get("/cholesterol/latest")
+def get_latest_cholesterol(
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get the most recent cholesterol test record"""
+    record = db.query(CholesterolRecord).filter(
+        CholesterolRecord.user_id == current_user["user_id"]
+    ).order_by(CholesterolRecord.test_date.desc()).first()
+    
+    if not record:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No cholesterol records found"
+        )
+    
+    return {
+        "record_id": getattr(record, 'id', getattr(record, 'record_id', None)),
+        "test_date": record.test_date.strftime("%Y-%m-%d"),
+        "total_cholesterol": record.total_cholesterol,
+        "ldl_cholesterol": record.ldl_cholesterol,
+        "hdl_cholesterol": record.hdl_cholesterol,
+        "triglycerides": record.triglycerides,
+        "created_at": record.created_at.isoformat() if record.created_at else None
+    }
+
+
+@router.delete("/cholesterol/{record_id}")
+def delete_cholesterol_record(
+    record_id: str,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Delete a cholesterol record"""
+    record = db.query(CholesterolRecord).filter(
+        CholesterolRecord.record_id == record_id,
+        CholesterolRecord.user_id == current_user["user_id"]
+    ).first()
+    
+    if not record:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Cholesterol record not found"
+        )
+    
+    db.delete(record)
+    db.commit()
+    
+    return {"message": "Cholesterol record deleted successfully"}

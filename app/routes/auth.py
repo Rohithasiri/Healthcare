@@ -1,10 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, EmailStr
 from app.database import get_db
 from app.models.user import User
 from app.utils.auth import hash_password, verify_password, create_access_token, get_current_user
-from datetime import datetime
+from datetime import datetime, timedelta
 
 router = APIRouter(prefix="/api/auth", tags=["Authentication"])
 
@@ -57,8 +58,46 @@ def register_user(user_data: UserRegister, db: Session = Depends(get_db)):
     }
 
 @router.post("/login")
-def login_user(credentials: UserLogin, db: Session = Depends(get_db)):
-    """Login user and return access token"""
+def login_user(
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: Session = Depends(get_db)
+):
+    """
+    Login user and return access token
+    Note: OAuth2PasswordRequestForm uses 'username' field, but we put email there
+    """
+    # form_data.username contains the email (OAuth2 standard)
+    user = db.query(User).filter(User.email == form_data.username).first()
+    
+    if not user or not verify_password(form_data.password, user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    # Update last login
+    user.last_login = datetime.utcnow()
+    db.commit()
+    
+    # Create access token
+    access_token = create_access_token(
+        data={"user_id": user.user_id, "email": user.email, "user_type": user.user_type}
+    )
+    
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user_id": user.user_id,
+        "full_name": user.full_name
+    }
+
+@router.post("/login-json")
+def login_user_json(credentials: UserLogin, db: Session = Depends(get_db)):
+    """
+    Alternative login endpoint that accepts JSON
+    Use this if you prefer JSON format over OAuth2 form
+    """
     user = db.query(User).filter(User.email == credentials.email).first()
     
     if not user or not verify_password(credentials.password, user.password_hash):

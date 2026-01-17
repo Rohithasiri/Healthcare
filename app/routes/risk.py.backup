@@ -1,0 +1,313 @@
+"""
+Risk Assessment API Routes
+Endpoints for calculating and retrieving cardiovascular risk assessments
+"""
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+from typing import List, Optional
+from pydantic import BaseModel, Field
+from datetime import datetime
+
+from app.database import get_db
+from app.services.risk_service import RiskAssessmentService
+from app.utils.auth import get_current_user
+from app.models.user import User
+
+
+router = APIRouter(prefix="/api/risk", tags=["Risk Assessment"])
+
+
+# Pydantic models for request/response
+class ManualRiskCalculationRequest(BaseModel):
+    """Manual risk calculation with provided values"""
+    age: int = Field(..., ge=18, le=120, description="Age in years")
+    gender: str = Field(..., pattern="^(male|female)$", description="Gender")
+    total_cholesterol: float = Field(..., ge=100, le=400, description="Total cholesterol (mg/dL)")
+    hdl_cholesterol: float = Field(..., ge=20, le=100, description="HDL cholesterol (mg/dL)")
+    systolic_bp: float = Field(..., ge=80, le=200, description="Systolic BP (mmHg)")
+    is_smoker: bool = Field(default=False, description="Current smoker")
+    has_diabetes: bool = Field(default=False, description="Has diabetes")
+    on_bp_medication: bool = Field(default=False, description="On BP medication")
+
+
+class RiskAssessmentResponse(BaseModel):
+    """Risk assessment result"""
+    assessment_id: Optional[int]
+    risk_score: float
+    risk_category: str
+    points: int
+    algorithm: str
+    timeframe: str
+    assessment_date: str
+    input_data: dict
+    recommendations: List[dict]
+
+
+class RiskHistoryItem(BaseModel):
+    """Single risk assessment history item"""
+    id: int
+    assessment_date: str
+    risk_score: float
+    risk_category: str
+    algorithm: str
+    systolic_bp: float
+    total_cholesterol: float
+
+
+@router.post("/calculate", response_model=RiskAssessmentResponse)
+async def calculate_risk(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Calculate cardiovascular risk for current user
+    Uses latest health data from database
+    """
+    try:
+        service = RiskAssessmentService(db)
+        result = service.assess_user_risk(current_user.id)
+        return result
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error calculating risk: {str(e)}"
+        )
+
+
+@router.post("/calculate/manual", response_model=dict)
+async def calculate_risk_manual(
+    request: ManualRiskCalculationRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Calculate cardiovascular risk with manually provided values
+    Does not save to database - for "what-if" scenarios
+    """
+    try:
+        service = RiskAssessmentService(db)
+        result = service.calculate_framingham_risk_score(
+            age=request.age,
+            gender=request.gender,
+            total_cholesterol=request.total_cholesterol,
+            hdl_cholesterol=request.hdl_cholesterol,
+            systolic_bp=request.systolic_bp,
+            is_smoker=request.is_smoker,
+            has_diabetes=request.has_diabetes,
+            on_bp_medication=request.on_bp_medication
+        )
+        
+        # Generate recommendations
+        recommendations = service.generate_recommendations(
+            risk_category=result['category'],
+            age=request.age,
+            systolic_bp=request.systolic_bp,
+            total_cholesterol=request.total_cholesterol,
+            ldl_cholesterol=request.total_cholesterol - request.hdl_cholesterol,
+            hdl_cholesterol=request.hdl_cholesterol,
+            is_smoker=request.is_smoker,
+            has_diabetes=request.has_diabetes
+        )
+        
+        return {
+            **result,
+            'assessment_date': datetime.now().isoformat(),
+            'recommendations': recommendations,
+            'note': 'This is a manual calculation and has not been saved to your profile'
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error calculating risk: {str(e)}"
+        )
+
+
+@router.get("/latest", response_model=dict)
+async def get_latest_risk(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get the most recent risk assessment for current user"""
+    try:
+        service = RiskAssessmentService(db)
+        history = service.get_risk_history(current_user.id, limit=1)
+        
+        if not history:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No risk assessments found. Please calculate your risk first."
+            )
+        
+        return history[0]
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error retrieving risk assessment: {str(e)}"
+        )
+
+
+@router.get("/history", response_model=List[RiskHistoryItem])
+async def get_risk_history(
+    limit: int = 10,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Get risk assessment history for current user
+    
+    Args:
+        limit: Maximum number of assessments to return (default: 10)
+    """
+    try:
+        service = RiskAssessmentService(db)
+        history = service.get_risk_history(current_user.id, limit=limit)
+        return history
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error retrieving history: {str(e)}"
+        )
+
+
+@router.get("/recommendations", response_model=List[dict])
+async def get_recommendations(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Get personalized health recommendations based on latest risk assessment
+    """
+    try:
+        service = RiskAssessmentService(db)
+        
+        # Get latest assessment
+        history = service.get_risk_history(current_user.id, limit=1)
+        
+        if not history:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No risk assessments found. Calculate your risk first."
+            )
+        
+        # Reconstruct latest assessment to get recommendations
+        latest = history[0]
+        
+        # Get user data to regenerate recommendations
+        from app.models.health_profile import HealthProfile
+        health_profile = db.query(HealthProfile).filter(
+            HealthProfile.user_id == current_user.id
+        ).first()
+        
+        if not health_profile:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Health profile not found"
+            )
+        
+        age = service.calculate_age(current_user.date_of_birth)
+        
+        recommendations = service.generate_recommendations(
+            risk_category=latest['risk_category'],
+            age=age,
+            systolic_bp=latest['systolic_bp'],
+            total_cholesterol=latest['total_cholesterol'],
+            ldl_cholesterol=latest.get('ldl_cholesterol', 100),
+            hdl_cholesterol=latest.get('hdl_cholesterol', 50),
+            is_smoker=health_profile.smoking_status == 'current',
+            has_diabetes=health_profile.has_diabetes,
+            bmi=health_profile.bmi
+        )
+        
+        return recommendations
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error generating recommendations: {str(e)}"
+        )
+
+
+@router.get("/dashboard", response_model=dict)
+async def get_risk_dashboard(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Get comprehensive risk dashboard data
+    Includes latest assessment, history trend, and recommendations
+    """
+    try:
+        service = RiskAssessmentService(db)
+        
+        # Get latest assessment
+        latest_list = service.get_risk_history(current_user.id, limit=1)
+        latest = latest_list[0] if latest_list else None
+        
+        # Get history for trend
+        history = service.get_risk_history(current_user.id, limit=6)
+        
+        # Get user health profile
+        from app.models.health_profile import HealthProfile
+        health_profile = db.query(HealthProfile).filter(
+            HealthProfile.user_id == current_user.id
+        ).first()
+        
+        dashboard = {
+            'latest_assessment': latest,
+            'history': history,
+            'trend': 'improving' if len(history) >= 2 and history[0]['risk_score'] < history[1]['risk_score'] else 'stable',
+            'health_status': {
+                'bmi': health_profile.bmi if health_profile else None,
+                'smoking': health_profile.smoking_status if health_profile else 'unknown',
+                'diabetes': health_profile.has_diabetes if health_profile else False
+            }
+        }
+        
+        return dashboard
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error loading dashboard: {str(e)}"
+        )
+
+
+@router.get("/categories/explain")
+async def explain_risk_categories():
+    """
+    Explain what each risk category means
+    Educational endpoint for users
+    """
+    return {
+        "categories": {
+            "low": {
+                "range": "< 10%",
+                "description": "Low 10-year cardiovascular disease risk",
+                "recommendation": "Maintain healthy lifestyle habits",
+                "color": "green"
+            },
+            "moderate": {
+                "range": "10-20%",
+                "description": "Moderate 10-year cardiovascular disease risk",
+                "recommendation": "Lifestyle changes and regular monitoring recommended",
+                "color": "yellow"
+            },
+            "high": {
+                "range": "> 20%",
+                "description": "High 10-year cardiovascular disease risk",
+                "recommendation": "Medical consultation and treatment strongly recommended",
+                "color": "red"
+            }
+        },
+        "note": "These categories are based on the Framingham Risk Score, which estimates the 10-year risk of developing cardiovascular disease."
+    }

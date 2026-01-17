@@ -3,6 +3,7 @@ from sqlalchemy.orm import relationship
 from app.database import Base
 from datetime import datetime
 
+
 class RiskAssessment(Base):
     __tablename__ = "risk_assessments"
     
