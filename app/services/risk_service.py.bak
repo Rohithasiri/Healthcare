@@ -304,7 +304,7 @@ class RiskAssessmentService:
         
         if latest_screening and latest_screening.estimated_systolic_bp:
             systolic_bp = latest_screening.estimated_systolic_bp
-            diastolic_bp = latest_screening.estimated_diastolic_bp
+            diastolic_bp = latest_screening.blood_pressure_diastolic
             has_bp_data = True
         
         # Get cholesterol values (use defaults if not available)

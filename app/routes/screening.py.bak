@@ -32,12 +32,11 @@ MAX_VIDEO_SIZE = 100 * 1024 * 1024  # 100MB
 class BPRecordCreate(BaseModel):
     """Blood pressure recording"""
     screening_date: str  # YYYY-MM-DD format
-    blood_pressure_systolic: int = Field(..., ge=70, le=250)
+    estimated_systolic_bp: int = Field(..., ge=70, le=250)
     blood_pressure_diastolic: int = Field(..., ge=40, le=150)
     heart_rate: Optional[int] = Field(None, ge=40, le=200)
     screening_type: str = "manual"  # manual, device, video
     notes: Optional[str] = None
-
 
 
 # ========== HELPER FUNCTIONS ==========
@@ -245,10 +244,10 @@ async def record_blood_pressure(
         new_record = ScreeningRecord(
             user_id=current_user["user_id"],
             screening_date=screening_date,
-            estimated_systolic_bp=bp_data.blood_pressure_systolic,  # ✅ Fixed
-            estimated_diastolic_bp=bp_data.blood_pressure_diastolic,  # ✅ Fixed
+            estimated_systolic_bp=bp_data.estimated_systolic_bp,
+            blood_pressure_diastolic=bp_data.blood_pressure_diastolic,
             heart_rate=bp_data.heart_rate,
-            screening_status="completed"   # ✅ Added
+            screening_type=bp_data.screening_type
         )
         
         db.add(new_record)
@@ -264,7 +263,7 @@ async def record_blood_pressure(
         
         # Classify BP
         bp_category = classify_blood_pressure(
-            bp_data.blood_pressure_systolic,
+            bp_data.estimated_systolic_bp,
             bp_data.blood_pressure_diastolic
         )
         
@@ -273,7 +272,7 @@ async def record_blood_pressure(
             "record_id": record_id,
             "screening_date": new_record.screening_date.strftime("%Y-%m-%d"),
             "systolic": new_record.estimated_systolic_bp,
-            "diastolic": new_record.estimated_diastolic_bp,
+            "diastolic": new_record.blood_pressure_diastolic,
             "heart_rate": new_record.heart_rate,
             "bp_category": bp_category,
             "recommendation": get_bp_recommendation(bp_category)
@@ -299,8 +298,7 @@ async def get_bp_history(
 ):
     """Get blood pressure measurement history"""
     records = db.query(ScreeningRecord).filter(
-        ScreeningRecord.user_id == current_user["user_id"],
-        ScreeningRecord.estimated_systolic_bp != None  # Only records with BP data
+        ScreeningRecord.user_id == current_user["user_id"]
     ).order_by(ScreeningRecord.screening_date.desc()).limit(limit).all()
     
     if not records:
@@ -312,19 +310,21 @@ async def get_bp_history(
     return {
         "records": [
             {
-                "record_id": r.record_id,
+                "record_id": getattr(r, 'id', getattr(r, 'record_id', None)),
                 "screening_date": r.screening_date.strftime("%Y-%m-%d"),
                 "systolic": r.estimated_systolic_bp,
-                "diastolic": r.estimated_diastolic_bp,
-                "heart_rate": r.heart_rate if r.heart_rate else None,
+                "diastolic": r.blood_pressure_diastolic,
+                "heart_rate": r.heart_rate,
+                "screening_type": r.screening_type,
                 "bp_category": classify_blood_pressure(
                     r.estimated_systolic_bp,
-                    r.estimated_diastolic_bp
+                    r.blood_pressure_diastolic
                 )
             }
             for r in records
         ]
     }
+
 
 @router.get("/bp/latest")
 async def get_latest_bp(
@@ -333,8 +333,7 @@ async def get_latest_bp(
 ):
     """Get most recent blood pressure reading"""
     record = db.query(ScreeningRecord).filter(
-        ScreeningRecord.user_id == current_user["user_id"],
-        ScreeningRecord.estimated_systolic_bp != None
+        ScreeningRecord.user_id == current_user["user_id"]
     ).order_by(ScreeningRecord.screening_date.desc()).first()
     
     if not record:
@@ -345,18 +344,20 @@ async def get_latest_bp(
     
     bp_category = classify_blood_pressure(
         record.estimated_systolic_bp,
-        record.estimated_diastolic_bp
+        record.blood_pressure_diastolic
     )
     
     return {
-        "record_id": record.record_id,
+        "record_id": getattr(record, 'id', getattr(record, 'record_id', None)),
         "screening_date": record.screening_date.strftime("%Y-%m-%d"),
         "systolic": record.estimated_systolic_bp,
-        "diastolic": record.estimated_diastolic_bp,
-        "heart_rate": record.heart_rate if record.heart_rate else None,
+        "diastolic": record.blood_pressure_diastolic,
+        "heart_rate": record.heart_rate,
+        "screening_type": record.screening_type,
         "bp_category": bp_category,
         "recommendation": get_bp_recommendation(bp_category)
     }
+
 
 @router.get("/bp/stats")
 async def get_bp_statistics(
@@ -376,8 +377,8 @@ async def get_bp_statistics(
     
     # Calculate averages
     avg_systolic = sum(r.estimated_systolic_bp for r in records) / len(records)
-    avg_diastolic = sum(r.estimated_diastolic_bp for r in records) / len(records)
-
+    avg_diastolic = sum(r.blood_pressure_diastolic for r in records) / len(records)
+    
     # Determine trend
     if len(records) >= 2:
         recent_avg_sys = sum(r.estimated_systolic_bp for r in records[:5]) / min(5, len(records))
@@ -395,7 +396,7 @@ async def get_bp_statistics(
         "latest_reading": {
             "date": records[0].screening_date.strftime("%Y-%m-%d"),
             "systolic": records[0].estimated_systolic_bp,
-            "diastolic": records[0].estimated_diastolic_bp
+            "diastolic": records[0].blood_pressure_diastolic
         }
     }
 
